@@ -49,14 +49,16 @@ By default `build.sh` builds the latest stable Tailscale release. To build a spe
 
 The workflow in [.github/workflows/build.yml](.github/workflows/build.yml) builds the image on GitHub for arm64, arm/v7 and amd64, so you don't need Docker locally. In a fork of this repository, enable Actions; the workflow then runs:
 
-* on every push to `main` and on `v*` tags,
-* every Monday, building the newest stable Tailscale if that version isn't published yet,
+* **daily**: if a new stable Tailscale version is out, it is built and published as a new GitHub release (e.g. `v1.104.2`). If there is nothing new, the run ends after a few seconds.
+* on every push to `main` (rebuilds the current Tailscale version and refreshes that release's files),
 * manually from the **Actions** tab (**Build image** → **Run workflow**), where you can pick a Tailscale version and extra features.
 
-Each run produces:
+Each build produces:
 
-* the image on GitHub Container Registry: `ghcr.io/<owner>/<repo>:latest` and `:<tailscale version>` (manual runs with extra features get a tag like `:1.104.2-ssh-useexitnode` instead and don't move `latest`). For a router to pull it without credentials, set the package visibility to **Public** under the package's settings on GitHub.
-* `tailscale-arm64.tar`, `tailscale-armv7.tar` and `tailscale-amd64.tar` as downloadable files on the workflow run's page, for Step 6b/6c.
+* the image on GitHub Container Registry: `ghcr.io/<owner>/<repo>:latest` and `:<tailscale version>`. Manual runs with extra features get a tag like `:1.104.2-ssh-useexitnode` instead, don't move `latest` and don't make a release. For a router to pull the image without credentials, set the package visibility to **Public** under the package's settings on GitHub.
+* `tailscale-arm64.tar`, `tailscale-armv7.tar` and `tailscale-amd64.tar`, attached to the GitHub release (and to the workflow run), for Step 6b/6c.
+
+To get an email when a new release appears, use **Watch → Custom → Releases** on the repository. GitHub turns off scheduled workflows in public repositories after 60 days without activity; if that happens, re-enable the workflow in the **Actions** tab.
 
 ### Configure the Router
 
