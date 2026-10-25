@@ -1,6 +1,8 @@
 # Minimal busybox for the tailscale container: a shell for the entrypoint,
 # STARTUP_SCRIPT/RUNNING_SCRIPT and `/container shell`, plus basic tools.
 CONFIG_STATIC=y
+# required on 32-bit (musl always has a 64-bit off_t)
+CONFIG_LFS=y
 CONFIG_BUSYBOX=y
 CONFIG_SHOW_USAGE=y
 CONFIG_FEATURE_COMPRESS_USAGE=y

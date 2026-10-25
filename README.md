@@ -16,6 +16,16 @@ The image is built to fit routers with small internal flash such as the hAP ax2:
 * There is no Alpine, bash, OpenSSH, curl, jq or iproute2. The image is `FROM scratch` with a small static [busybox](busybox.fragment) (`sh`, `ip`, `sysctl`, `vi`, `ping`, `wget`, ...) and a static `iptables-legacy`.
 * CA root certificates are embedded in the binary instead of shipping `/etc/ssl`.
 
+Images are built for these router CPUs:
+
+| Image | Routers (examples) | Notes |
+| --- | --- | --- |
+| arm64 | hAP ax², hAP ax³, RB5009 | |
+| arm (32-bit, ARMv7) | hAP ac², hAP ac³, RB4011 | hAP ac² has only 16 MB of flash: keep the container on a USB stick (`disk1`) |
+| amd64 | CHR, x86 | |
+
+Not covered: MIPS routers, and the ARMv5-based models (EN7562 CPU, e.g. hEX refresh).
+
 Kept features: subnet routes (`--advertise-routes`), exit node (`--advertise-exit-node`), `--accept-routes`, MagicDNS, direct (NAT traversal) connections, OAuth client secrets as `AUTH_KEY`, iptables firewall/SNAT. Compiled out include Tailscale SSH, Taildrop, Serve/Funnel, using an exit node (`--exit-node`), UPnP/NAT-PMP port mapping, Tailnet Lock and `tailscale update`. To add any of them back, append its name to `TS_FEATURES` in the [Dockerfile](Dockerfile) (`go run ./cmd/featuretags --list` in the tailscale source lists them all); each adds some size.
 
 ## Requirements
@@ -55,7 +65,7 @@ The workflow in [.github/workflows/build.yml](.github/workflows/build.yml) build
 
 Each build produces:
 
-* the image on GitHub Container Registry: `ghcr.io/<owner>/<repo>:latest` and `:<tailscale version>`. Manual runs with extra features get a tag like `:1.104.2-ssh-useexitnode` instead, don't move `latest` and don't make a release. For a router to pull the image without credentials, set the package visibility to **Public** under the package's settings on GitHub.
+* the image on GitHub Container Registry: `ghcr.io/<owner>/<repo>:latest` and `:<tailscale version>`. Both are multi-architecture images, so a router pulling them gets the arm64, arm or amd64 variant that matches its CPU automatically. Manual runs with extra features get a tag like `:1.104.2-ssh-useexitnode` instead, don't move `latest` and don't make a release. For a router to pull the image without credentials, set the package visibility to **Public** under the package's settings on GitHub.
 * `tailscale-arm64.tar`, `tailscale-armv7.tar` and `tailscale-amd64.tar`, attached to the GitHub release (and to the workflow run), for Step 6b/6c.
 
 To get an email when a new release appears, use **Watch → Custom → Releases** on the repository. GitHub turns off scheduled workflows in public repositories after 60 days without activity; if that happens, re-enable the workflow in the **Actions** tab.
