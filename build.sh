@@ -3,9 +3,9 @@
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 #
-# Updates tailscale respository and runs `docker build` with flags configured for 
-# docker distribution. 
-# 
+# Runs `docker buildx build` and exports the image as tailscale.tar for
+# uploading to the router. The tailscale source is cloned inside the build.
+#
 ############################################################################
 #
 # WARNING: Tailscale is not yet officially supported in Docker,
@@ -27,27 +27,16 @@
 # https://mikrotik.com/products/matrix
 #
 PLATFORM="linux/arm64"
-TAILSCALE_VERSION=1.96.3
+TAILSCALE_VERSION=1.104.2
 VERSION=0.1.40
 
 set -eu
 
 rm -f tailscale.tar
 
-if [ ! -d ./tailscale/.git ]
-then
-    git -c advice.detachedHead=false clone https://github.com/tailscale/tailscale.git --branch v$TAILSCALE_VERSION
-fi
-
-TS_USE_TOOLCHAIN="Y"
-cd tailscale && eval $(./build_dist.sh shellvars) && cd ..
-
 docker buildx build \
   --no-cache \
   --build-arg TAILSCALE_VERSION=$TAILSCALE_VERSION \
-  --build-arg VERSION_LONG=$VERSION_LONG \
-  --build-arg VERSION_SHORT=$VERSION_SHORT \
-  --build-arg VERSION_GIT_HASH=$VERSION_GIT_HASH \
   --platform $PLATFORM \
   --builder arm64-builder \
   --load -t ghcr.io/fluent-networks/tailscale-mikrotik:$VERSION .

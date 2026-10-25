@@ -8,6 +8,16 @@ The instructions below assume a use case for tailscale-enabled hosts accessing a
 
 Other site to site scenarios are outlined in the [project wiki](https://github.com/Fluent-networks/tailscale-mikrotik/wiki).
 
+## Minimal image
+
+The image is built to fit routers with small internal flash such as the hAP ax2: the arm64 image is about **4.4 MB** (the image tar and the extracted container are both that size).
+
+* `tailscale` and `tailscaled` are a single binary (`tailscale` is a symlink), built with every Tailscale feature a subnet router / exit node does not need compiled out, then packed with UPX (LZMA).
+* There is no Alpine, bash, OpenSSH, curl, jq or iproute2. The image is `FROM scratch` with a small static [busybox](busybox.fragment) (`sh`, `ip`, `sysctl`, `vi`, `ping`, `wget`, ...) and a static `iptables-legacy`.
+* CA root certificates are embedded in the binary instead of shipping `/etc/ssl`.
+
+Kept features: subnet routes (`--advertise-routes`), exit node (`--advertise-exit-node`), `--accept-routes`, MagicDNS, direct (NAT traversal) connections, OAuth client secrets as `AUTH_KEY`, iptables firewall/SNAT. Compiled out include Tailscale SSH, Taildrop, Serve/Funnel, using an exit node (`--exit-node`), UPnP/NAT-PMP port mapping, Tailnet Lock and `tailscale update`. To add any of them back, append its name to `TS_FEATURES` in the [Dockerfile](Dockerfile) (`go run ./cmd/featuretags --list` in the tailscale source lists them all); each adds some size.
+
 ## Requirements
 
 The Mikrotik Container package is compatible with ARM, ARM64 and x86 architectures and the router must be be running RouterOS v7.6 or later. Refer to the [Mikrotik Container documentation](https://help.mikrotik.com/docs/display/ROS/Container) for recommendations, disclaimer and security risks. 
@@ -27,7 +37,7 @@ Note storage of the docker image on the router uses a USB drive mounted as **dis
 
 **Note**: this step is only required if you are uploading a tar image file to your router as per Configuration Step 6b.
 
-The build script uses [Docker Buildx](https://docs.docker.com/buildx/working-with-buildx/).
+The build script uses [Docker Buildx](https://docs.docker.com/buildx/working-with-buildx/). Tailscale is cloned and cross-compiled inside the build, so no local Go or tailscale checkout is needed; busybox and iptables are compiled for the target platform, so the builder needs to run (or emulate) it, as before.
 
 1. In `build.sh` set the PLATFORM shell script variable as required for the target router CPU - see [https://mikrotik.com/products/matrix](https://mikrotik.com/products/matrix)
 
@@ -68,12 +78,12 @@ This section follows the Mikrotik Container documentation with additional steps 
 
 | Variable          | Description                                   | Comment                                      |
 | ----------------- | --------------------------------------------- | -------------------------------------------- |
-| PASSWORD          | System root user password                     |                                              |
+| PASSWORD          | Not used: the minimal image has no SSH server  | Use `/container/shell` on the router         |
 | AUTH_KEY          | Tailscale non-reusable key, [Oauth secret](https://tailscale.com/kb/1215/oauth-clients#registering-new-nodes-using-oauth-credentials) or Headscale pre-authenticated key                       | Generate from the Tailscale console or Headscale CLI         |
 | ADVERTISE_ROUTES  | Comma-separated list of routes to advertise   |                                              |
 | CONTAINER_GATEWAY | The container bridge (veth1) IP address on the router |                                              |
 | LOGIN_SERVER      | Headscale login server                        | Only required for Headscale control server. Do not set if using Tailscale       |
-| UPDATE_TAILSCALE      | Update tailscale on container startup                         |       |
+| UPDATE_TAILSCALE      | Not used: update by building or pulling a newer image          |       |
 | TAILSCALE_ARGS    | Additional arguments passed to tailscale      | Optional. Note:<br/> ```--accept-routes``` is required to accept the advertised routes of the other subnet routers.<br/> ```--netfilter-mode``` controls the degree of firewall configuration using iptables. See [tailscale up](https://tailscale.com/kb/1241/tailscale-up). |
 | TAILSCALED_ARGS   | Additional arguments passed to tailscaled     | Optional                                     |
 | STARTUP_SCRIPT    | Extra script to execute in container before tailscaled | Optional |
@@ -82,17 +92,14 @@ This section follows the Mikrotik Container documentation with additional steps 
 Example Tailscale control server configuration:
 ```
 /container/envs
-add list="tailscale" key="PASSWORD" value="xxxxxxxxxxxxxx"
 add list="tailscale" key="AUTH_KEY" value="tskey-xxxxxxxxxxxxxxxxxxxxxxxx"
 add list="tailscale" key="ADVERTISE_ROUTES" value="192.168.88.0/24"
 add list="tailscale" key="CONTAINER_GATEWAY" value="172.17.0.1"
-add list="tailscale" key="UPDATE_TAILSCALE" value="Y"
 add list="tailscale" key="TAILSCALE_ARGS" value="--accept-routes --advertise-exit-node"
 ```
 Example Headscale control server configuration:
 ```
 /container/envs
-add list="tailscale" key="PASSWORD" value="xxxxxxxxxxxxxx"
 add list="tailscale" key="AUTH_KEY" value="xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 add list="tailscale" key="ADVERTISE_ROUTES" value="192.168.88.0/24"
 add list="tailscale" key="CONTAINER_GATEWAY" value="172.17.0.1"
@@ -109,6 +116,8 @@ add name="tailscale" src="/tailscale" dst="/var/lib/tailscale"
 
 It's possible to execute extra scripts during container startup. To do this, firstly make sure that script(s) are accessible inside
 container, for example in `/var/lib/tailscale` folder. 
+
+Scripts are run with busybox `sh` (ash with bash-compatible extensions such as `[[ ]]`; there are no bash arrays).
 
 Then add `STARTUP_SCRIPT` and/or `RUNNING_SCRIPT` environment variables:
 
@@ -151,7 +160,7 @@ For routers without USB port (tested on hAP ax2) it's possible to use ramdisk to
 Firstly make sure that there is no old version of container installed. Firstly create `tmpfs` disk:
 
 ```
-/disk add type=tmpfs tmpfs-max-size=200M
+/disk add type=tmpfs tmpfs-max-size=10M
 ```
 Upload `tailscale.tar` file to `tmp1/` disk (or move it after uploading to root folder)
 
@@ -176,7 +185,7 @@ Ensure the container has been extracted and added using `/container/print`. The 
 
 In the Tailscale console, check the router is authenticated and enable the subnet routes. Your tailscale hosts should now be able to reach the router's LAN subnet. 
 
-The container exposes a SSH server for management purposes using root credentials, and can be accessed via the router's tailscale address or the veth interface address. Alternatively, you can access the container via the router CLI:
+The minimal image has no SSH server. Access the container via the router CLI:
 
 ```
 /container/shell 0

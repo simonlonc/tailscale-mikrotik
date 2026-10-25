@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Copyright (c) 2020 Fluent Networks Inc & AUTHORS All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
@@ -18,60 +19,125 @@
 #    https://github.com/tailscale/tailscale/labels/containers
 #
 ############################################################################
+#
+# Minimal image (~4.4 MB for arm64) for routers with little flash, e.g. hAP ax2:
+#  - tailscale and tailscaled are ONE binary (tailscale is a symlink), built
+#    with every feature a subnet router / exit node doesn't need compiled out
+#    (see TS_FEATURES), then packed with UPX (LZMA)
+#  - no Alpine, bash, openssh, curl, jq or iproute2: FROM scratch with a small
+#    static busybox (sh, ip, sysctl, vi, ping, ...) and a static iptables-legacy
+#  - CA roots are embedded in the binary instead of shipping /etc/ssl
+#
+############################################################################
 
-FROM golang:1.26-alpine AS build-env
+ARG GO_VERSION=1.27
+ARG ALPINE_VERSION=3.22
 
-WORKDIR /go/src/tailscale
+# --- 1. tailscale: cross-compiled natively on the build machine -------------
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS tailscale
+RUN apk add --no-cache git upx
+ENV CGO_ENABLED=0 GOTOOLCHAIN=auto
 
-COPY tailscale/go.mod tailscale/go.sum ./
-RUN go mod download
+ARG TAILSCALE_VERSION=1.104.2
+RUN git -c advice.detachedHead=false clone --depth 1 \
+      --branch v${TAILSCALE_VERSION} https://github.com/tailscale/tailscale.git /src
+WORKDIR /src
 
-RUN apk add --no-cache upx
+# Features to keep; everything else is compiled out.
+# List all features with: go run ./cmd/featuretags --list
+#   cli               - tailscale CLI inside the tailscaled binary
+#   osrouter,iptables - kernel TUN + routes + iptables (RouterOS has no nftables)
+#   nattraversal      - direct UDP connections (otherwise everything uses DERP)
+#   advertiseroutes, advertiseexitnode, useroutes (--accept-routes)
+#   ipnbus            - needed by "tailscale up"
+#   oauthkey          - AUTH_KEY may be an OAuth client secret
+#   dns, bakedroots
+# Add e.g. "ssh", "useexitnode", "portmapper" or "tailnetlock" if you need them.
+ARG TS_FEATURES=cli,osrouter,iptables,nattraversal,advertiseroutes,advertiseexitnode,useroutes,ipnbus,oauthkey,dns,bakedroots
 
-# Pre-build some stuff before the following COPY line invalidates the Docker cache.
-RUN go install \
-    github.com/aws/aws-sdk-go-v2/aws \
-    github.com/aws/aws-sdk-go-v2/config \
-    gvisor.dev/gvisor/pkg/tcpip/adapters/gonet \
-    gvisor.dev/gvisor/pkg/tcpip/stack \
-    golang.org/x/crypto/ssh \
-    golang.org/x/crypto/acme \
-    github.com/coder/websocket \
-    github.com/mdlayher/netlink
+# Embed Mozilla CA roots, used only when the image has no CA bundle (it has none).
+RUN printf 'package main\n\nimport _ "golang.org/x/crypto/x509roots/fallback"\n' \
+      > cmd/tailscaled/fallbackroots.go
 
-COPY tailscale/. .
-
-# see build.sh
-ARG VERSION_LONG=""
-ENV VERSION_LONG=$VERSION_LONG
-ARG VERSION_SHORT=""
-ENV VERSION_SHORT=$VERSION_SHORT
-ARG VERSION_GIT_HASH=""
-ENV VERSION_GIT_HASH=$VERSION_GIT_HASH
 ARG TARGETARCH
+ARG TARGETVARIANT
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
+    eval "$(go run ./cmd/mkversion)"; \
+    TAGS="$(go run ./cmd/featuretags --min --add=${TS_FEATURES})"; \
+    if [ "$TARGETARCH" = arm ]; then export GOARM="${TARGETVARIANT#v}"; fi; \
+    GOOS=linux GOARCH=$TARGETARCH go build -trimpath -tags="$TAGS" \
+      -ldflags="-s -w -buildid= \
+        -X tailscale.com/version.longStamp=$VERSION_LONG \
+        -X tailscale.com/version.shortStamp=$VERSION_SHORT" \
+      -o /out/tailscaled ./cmd/tailscaled; \
+    upx --lzma --best /out/tailscaled
 
-RUN GOARCH=$TARGETARCH go install -ldflags="-w -s\
-      -X tailscale.com/version.Long=$VERSION_LONG \
-      -X tailscale.com/version.Short=$VERSION_SHORT \
-      -X tailscale.com/version.GitCommit=$VERSION_GIT_HASH" \
-      -v ./cmd/tailscale ./cmd/tailscaled
+# --- 2. static busybox + iptables-legacy, built for the target (musl) -------
+FROM alpine:${ALPINE_VERSION} AS tools
+RUN apk add --no-cache build-base linux-headers pkgconf
+ADD --checksum=sha256:3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 \
+    https://busybox.net/downloads/busybox-1.37.0.tar.bz2 /src/
+ADD --checksum=sha256:d87303d55ef8c92bcad4dd3f978b26d272013642b029425775f5bad1009fe7b2 \
+    https://www.netfilter.org/pub/iptables/iptables-1.8.11.tar.xz /src/
+COPY busybox.fragment /src/
 
-RUN upx /go/bin/tailscale && upx /go/bin/tailscaled
+WORKDIR /src
+RUN set -e; \
+    tar xjf busybox-1.37.0.tar.bz2; cd busybox-1.37.0; \
+    make allnoconfig >/dev/null; \
+    grep -E '^(# )?CONFIG_' ../busybox.fragment | while IFS= read -r line; do \
+      k=$(echo "$line" | grep -o 'CONFIG_[A-Z0-9_]*'); \
+      sed -i "/^# $k is not set\$/d; /^$k=/d" .config; \
+      echo "$line" >> .config; \
+    done; \
+    yes '' | make oldconfig >/dev/null; \
+    make -j"$(nproc)" busybox busybox.links; \
+    install -D -m 755 busybox /out/bin/busybox; \
+    cp busybox.links /out/busybox.links
 
-FROM alpine:3.22
+RUN set -e; \
+    tar xJf iptables-1.8.11.tar.xz; cd iptables-1.8.11; \
+    ./configure CFLAGS="-Os -ffunction-sections -fdata-sections" \
+      --prefix=/usr --sysconfdir=/etc --enable-static --disable-shared \
+      --disable-nftables --disable-libipq --disable-bpf-compiler \
+      --disable-nfsynproxy --disable-connlabel --disable-libnfnetlink \
+      --disable-devel --disable-largefile; \
+    make -j"$(nproc)" LDFLAGS="-all-static -Wl,--gc-sections"; \
+    mkdir -p /out/usr/sbin; \
+    strip -o /out/usr/sbin/xtables-legacy-multi iptables/xtables-legacy-multi
 
-RUN apk add --no-cache ca-certificates iptables iptables-legacy iproute2 bash openssh curl jq
+# --- 3. assemble the root filesystem ----------------------------------------
+FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS assemble
+RUN apk add --no-cache upx
+COPY --from=tools /out/ /rootfs/
+COPY --from=tailscale /out/tailscaled /rootfs/usr/local/bin/tailscaled
+COPY tailscale.sh /rootfs/usr/local/bin/tailscale.sh
+WORKDIR /rootfs
+RUN set -e; \
+    upx --lzma --best bin/busybox usr/sbin/xtables-legacy-multi; \
+    for l in $(cat busybox.links); do \
+      mkdir -p ".${l%/*}"; ln -s /bin/busybox ".$l"; \
+    done; \
+    rm busybox.links; \
+    for a in iptables iptables-save iptables-restore \
+             ip6tables ip6tables-save ip6tables-restore \
+             iptables-legacy iptables-legacy-save iptables-legacy-restore \
+             ip6tables-legacy ip6tables-legacy-save ip6tables-legacy-restore; do \
+      ln -s xtables-legacy-multi usr/sbin/$a; \
+    done; \
+    ln -s tailscaled usr/local/bin/tailscale; \
+    chmod 755 usr/local/bin/tailscale.sh; \
+    mkdir -p etc root tmp run var/lib/tailscale proc sys dev; \
+    chmod 700 root; chmod 1777 tmp; ln -s ../run var/run; \
+    printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/false\n' > etc/passwd; \
+    printf 'root:x:0:root\nnobody:x:65534:\n' > etc/group; \
+    printf 'hosts: files dns\n' > etc/nsswitch.conf; \
+    printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > etc/hosts
 
-RUN ln -s /usr/sbin/iptables-legacy /usr/local/bin/iptables
-RUN ln -s /usr/sbin/ip6tables-legacy /usr/local/bin/ip6tables
-
-RUN ssh-keygen -f /etc/ssh/ssh_host_rsa_key -N '' -t rsa
-RUN ssh-keygen -f /etc/ssh/ssh_host_ed25519_key -N '' -t ed25519
-
-COPY --from=build-env /go/bin/* /usr/local/bin/
-COPY sshd_config /etc/ssh/
-COPY tailscale.sh /usr/local/bin
-
-EXPOSE 22
+# --- 4. final image -----------------------------------------------------------
+FROM scratch
+COPY --from=assemble /rootfs/ /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CMD ["/usr/local/bin/tailscale.sh"]
-
