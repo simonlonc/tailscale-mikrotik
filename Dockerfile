@@ -20,7 +20,8 @@
 #
 ############################################################################
 #
-# Minimal image (~4.4 MB for arm64) for routers with little flash, e.g. hAP ax2:
+# Minimal image (~4.4 MB) for routers with little flash, e.g. hAP ax2.
+# Platforms: linux/arm64, linux/arm/v7, linux/arm/v5, linux/amd64
 #  - tailscale and tailscaled are ONE binary (tailscale is a symlink), built
 #    with every feature a subnet router / exit node doesn't need compiled out
 #    (see TS_FEATURES), then packed with UPX (LZMA)
@@ -32,6 +33,7 @@
 
 ARG GO_VERSION=1.27
 ARG ALPINE_VERSION=3.22
+ARG UBUNTU_VERSION=24.04
 
 # --- 1. tailscale: cross-compiled natively on the build machine -------------
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS tailscale
@@ -80,17 +82,48 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/tailscaled ./cmd/tailscaled; \
     upx --lzma --best /out/tailscaled
 
-# --- 2. static busybox + iptables-legacy, built for the target (musl) -------
-FROM alpine:${ALPINE_VERSION} AS tools
-RUN apk add --no-cache build-base linux-headers pkgconf
+# --- 2. static busybox + iptables-legacy, cross-compiled with musl ---------
+# Cross-compiling (instead of building on an emulated target) is faster and
+# also covers ARMv5, for which there is no Alpine image.
+FROM --platform=$BUILDPLATFORM ubuntu:${UBUNTU_VERSION} AS tools
+ARG TARGETARCH
+ARG TARGETVARIANT
+RUN set -e; \
+    case "$TARGETARCH$TARGETVARIANT" in \
+      amd64*) T=x86_64-linux-gnu;    D=amd64; F="" ;; \
+      arm64*) T=aarch64-linux-gnu;   D=arm64; F="" ;; \
+      armv7)  T=arm-linux-gnueabihf; D=armhf; F="" ;; \
+      armv5)  T=arm-linux-gnueabi;   D=armel; F="-march=armv5t -marm -mfloat-abi=soft" ;; \
+      *) echo "Unsupported platform: $TARGETARCH/$TARGETVARIANT" >&2; exit 1 ;; \
+    esac; \
+    printf 'T=%s\nF="%s"\n' "$T" "$F" > /target.env; \
+    apt-get update -q; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+      gcc libc6-dev make bzip2 xz-utils pkgconf \
+      "gcc-$(echo "$T" | tr _ -)" "linux-libc-dev-$D-cross"; \
+    rm -rf /var/lib/apt/lists/*
+
+ADD --checksum=sha256:a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 \
+    https://musl.libc.org/releases/musl-1.2.5.tar.gz /src/
 ADD --checksum=sha256:3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 \
     https://busybox.net/downloads/busybox-1.37.0.tar.bz2 /src/
 ADD --checksum=sha256:d87303d55ef8c92bcad4dd3f978b26d272013642b029425775f5bad1009fe7b2 \
     https://www.netfilter.org/pub/iptables/iptables-1.8.11.tar.xz /src/
 COPY busybox.fragment /src/
-
 WORKDIR /src
-RUN set -e; \
+
+# musl for the target, plus a "target-cc" compiler wrapper
+RUN set -e; . /target.env; \
+    tar xzf musl-1.2.5.tar.gz; cd musl-1.2.5; \
+    ./configure --target="$T" CROSS_COMPILE="$T-" CFLAGS="-Os $F" \
+      --prefix=/opt/musl --disable-shared >/dev/null; \
+    make -j"$(nproc)" >/dev/null; make install >/dev/null; \
+    cp -r "/usr/$T/include/linux" "/usr/$T/include/asm" "/usr/$T/include/asm-generic" \
+      /opt/musl/include/; \
+    printf '#!/bin/sh\nexec /opt/musl/bin/musl-gcc %s "$@"\n' "$F" > /usr/local/bin/target-cc; \
+    chmod 755 /usr/local/bin/target-cc
+
+RUN set -e; . /target.env; \
     tar xjf busybox-1.37.0.tar.bz2; cd busybox-1.37.0; \
     make allnoconfig >/dev/null; \
     grep -E '^(# )?CONFIG_' ../busybox.fragment | while IFS= read -r line; do \
@@ -99,20 +132,20 @@ RUN set -e; \
       echo "$line" >> .config; \
     done; \
     yes '' | make oldconfig >/dev/null; \
-    make -j"$(nproc)" busybox busybox.links; \
+    make -j"$(nproc)" CROSS_COMPILE="$T-" CC=target-cc busybox busybox.links; \
     install -D -m 755 busybox /out/bin/busybox; \
     cp busybox.links /out/busybox.links
 
-RUN set -e; \
+RUN set -e; . /target.env; \
     tar xJf iptables-1.8.11.tar.xz; cd iptables-1.8.11; \
-    ./configure CFLAGS="-Os -ffunction-sections -fdata-sections" \
+    ./configure --host="$T" CC=target-cc CFLAGS="-Os -ffunction-sections -fdata-sections" \
       --prefix=/usr --sysconfdir=/etc --enable-static --disable-shared \
       --disable-nftables --disable-libipq --disable-bpf-compiler \
       --disable-nfsynproxy --disable-connlabel --disable-libnfnetlink \
       --disable-devel --disable-largefile; \
     make -j"$(nproc)" LDFLAGS="-all-static -Wl,--gc-sections"; \
     mkdir -p /out/usr/sbin; \
-    strip -o /out/usr/sbin/xtables-legacy-multi iptables/xtables-legacy-multi
+    "$T-strip" -o /out/usr/sbin/xtables-legacy-multi iptables/xtables-legacy-multi
 
 # --- 3. assemble the root filesystem ----------------------------------------
 FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS assemble

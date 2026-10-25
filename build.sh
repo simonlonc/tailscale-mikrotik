@@ -25,8 +25,13 @@
 #
 # Set PLATFORM as required for your router model. See:
 # https://mikrotik.com/products/matrix
+#   linux/arm64   - hAP ax2, hAP ax3, RB5009, ...
+#   linux/arm/v7  - 32-bit ARM: hAP ac2, hAP ac3, RB4011, ...
+#   linux/arm/v5  - ARMv5 (EN7562 CPU): hEX refresh, ...
+#   linux/amd64   - CHR, x86
+# Everything is cross-compiled, so no emulation or special builder is needed.
 #
-PLATFORM="linux/arm64"
+PLATFORM="${PLATFORM:-linux/arm64}"
 VERSION=0.1.40
 
 # Tailscale version to build. "latest" picks the newest stable release
@@ -57,7 +62,6 @@ docker buildx build \
   --build-arg TAILSCALE_VERSION=$TAILSCALE_VERSION \
   --build-arg TS_EXTRA_FEATURES=$TS_EXTRA_FEATURES \
   --platform $PLATFORM \
-  --builder arm64-builder \
   --load -t ghcr.io/fluent-networks/tailscale-mikrotik:$VERSION .
 
 skopeo copy docker-daemon:ghcr.io/fluent-networks/tailscale-mikrotik:$VERSION docker-archive:tailscale.tar
