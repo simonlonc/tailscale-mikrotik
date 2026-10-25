@@ -43,6 +43,8 @@ The build script uses [Docker Buildx](https://docs.docker.com/buildx/working-wit
 
 2. Run `./build.sh` to build the image. The build process will generate a container image archive file **`tailscale.tar`**
 
+By default `build.sh` builds the latest stable Tailscale release. To build a specific version, run e.g. `TAILSCALE_VERSION=1.104.2 ./build.sh`.
+
 ### Configure the Router
 
 This section follows the Mikrotik Container documentation with additional steps to route the LAN subnet via the tailscale container.
