@@ -1,0 +1,161 @@
+name: Build image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  schedule:
+    # Every Monday: build the newest stable Tailscale if it isn't published yet
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      tailscale_version:
+        description: 'Tailscale version (e.g. 1.104.2), or "latest" for the newest stable release'
+        default: latest
+        required: true
+      extra_features:
+        description: "Extra Tailscale features, comma-separated (e.g. ssh,useexitnode)"
+        default: ""
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # MikroTik CPUs: arm64 (hAP ax2/ax3, RB5009...), arm/v7 (hAP ac2/ac3...), amd64 (CHR, x86)
+  PLATFORMS: linux/arm64,linux/arm/v7,linux/amd64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve Tailscale version and image tags
+        id: meta
+        env:
+          REQUESTED_VERSION: ${{ inputs.tailscale_version || 'latest' }}
+          EXTRA_FEATURES: ${{ inputs.extra_features }}
+          IS_DEFAULT_BRANCH: ${{ github.ref_name == github.event.repository.default_branch }}
+        run: |
+          set -eu
+          version="$REQUESTED_VERSION"
+          if [ "$version" = latest ]; then
+            # Stable Tailscale releases have an even minor version (1.104.x)
+            version=$(git ls-remote --tags --refs https://github.com/tailscale/tailscale.git 'v1.*' \
+              | sed -n 's#.*refs/tags/v\(1\.[0-9]*[02468]\.[0-9]*\)$#\1#p' \
+              | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::Could not determine the Tailscale version"
+            exit 1
+          fi
+
+          extra=$(echo "$EXTRA_FEATURES" | tr -d ' ')
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [ -n "$extra" ]; then
+            tags="$image:$version-$(echo "$extra" | tr ',' '-')"
+          else
+            tags="$image:$version"
+            if [ "$REQUESTED_VERSION" = latest ] && [ "$IS_DEFAULT_BRANCH" = true ]; then
+              tags="$tags,$image:latest"
+            fi
+          fi
+
+          {
+            echo "version=$version"
+            echo "extra=$extra"
+            echo "image=$image"
+            echo "tags=$tags"
+            echo "first_tag=${tags%%,*}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Tailscale $version${extra:+ with extra features $extra} -> $tags"
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if this version is already published
+        id: check
+        if: github.event_name == 'schedule'
+        env:
+          FIRST_TAG: ${{ steps.meta.outputs.first_tag }}
+        run: |
+          if docker manifest inspect "$FIRST_TAG" > /dev/null 2>&1; then
+            echo "$FIRST_TAG already exists, nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-qemu-action@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          platforms: arm64,arm
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.check.outputs.skip != 'true'
+
+      # Multi-arch image on ghcr.io, which RouterOS can pull directly
+      - name: Build (and push) the image
+        if: steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          build-args: |
+            TAILSCALE_VERSION=${{ steps.meta.outputs.version }}
+            TS_EXTRA_FEATURES=${{ steps.meta.outputs.extra }}
+          # plain Docker manifests; RouterOS doesn't need attestations
+          provenance: false
+          sbom: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # tailscale-<arch>.tar files for /container/add file=... (reuses the build cache)
+      - name: Export image archives for RouterOS
+        if: steps.check.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          EXTRA: ${{ steps.meta.outputs.extra }}
+        run: |
+          set -eu
+          command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
+          for platform in $(echo "$PLATFORMS" | tr ',' ' '); do
+            arch=$(echo "${platform#linux/}" | tr -d '/')
+            docker buildx build --platform "$platform" --load -t "tailscale-mikrotik:$arch" \
+              --build-arg TAILSCALE_VERSION="$VERSION" --build-arg TS_EXTRA_FEATURES="$EXTRA" .
+            skopeo copy "docker-daemon:tailscale-mikrotik:$arch" "docker-archive:tailscale-$arch.tar"
+          done
+          ls -l tailscale-*.tar
+
+      - uses: actions/upload-artifact@v7
+        if: steps.check.outputs.skip != 'true'
+        with:
+          path: tailscale-arm64.tar
+          archive: false
+
+      - uses: actions/upload-artifact@v7
+        if: steps.check.outputs.skip != 'true'
+        with:
+          path: tailscale-armv7.tar
+          archive: false
+
+      - uses: actions/upload-artifact@v7
+        if: steps.check.outputs.skip != 'true'
+        with:
+          path: tailscale-amd64.tar
+          archive: false

@@ -34,6 +34,9 @@ VERSION=0.1.40
 # unstable). To pin a version: TAILSCALE_VERSION=1.104.2 ./build.sh
 TAILSCALE_VERSION=${TAILSCALE_VERSION:-latest}
 
+# Optional extra Tailscale features, e.g.: TS_EXTRA_FEATURES=ssh,useexitnode ./build.sh
+TS_EXTRA_FEATURES=${TS_EXTRA_FEATURES:-}
+
 set -eu
 
 if [ "$TAILSCALE_VERSION" = "latest" ]; then
@@ -45,13 +48,14 @@ if [ "$TAILSCALE_VERSION" = "latest" ]; then
     exit 1
   fi
 fi
-echo "Building Tailscale $TAILSCALE_VERSION"
+echo "Building Tailscale $TAILSCALE_VERSION${TS_EXTRA_FEATURES:+ with extra features: $TS_EXTRA_FEATURES}"
 
 rm -f tailscale.tar
 
 docker buildx build \
   --no-cache \
   --build-arg TAILSCALE_VERSION=$TAILSCALE_VERSION \
+  --build-arg TS_EXTRA_FEATURES=$TS_EXTRA_FEATURES \
   --platform $PLATFORM \
   --builder arm64-builder \
   --load -t ghcr.io/fluent-networks/tailscale-mikrotik:$VERSION .

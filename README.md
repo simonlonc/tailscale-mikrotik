@@ -43,7 +43,20 @@ The build script uses [Docker Buildx](https://docs.docker.com/buildx/working-wit
 
 2. Run `./build.sh` to build the image. The build process will generate a container image archive file **`tailscale.tar`**
 
-By default `build.sh` builds the latest stable Tailscale release. To build a specific version, run e.g. `TAILSCALE_VERSION=1.104.2 ./build.sh`.
+By default `build.sh` builds the latest stable Tailscale release. To build a specific version, run e.g. `TAILSCALE_VERSION=1.104.2 ./build.sh`. To add Tailscale features, run e.g. `TS_EXTRA_FEATURES=ssh,useexitnode ./build.sh`.
+
+### Build with GitHub Actions
+
+The workflow in [.github/workflows/build.yml](.github/workflows/build.yml) builds the image on GitHub for arm64, arm/v7 and amd64, so you don't need Docker locally. In a fork of this repository, enable Actions; the workflow then runs:
+
+* on every push to `main` and on `v*` tags,
+* every Monday, building the newest stable Tailscale if that version isn't published yet,
+* manually from the **Actions** tab (**Build image** → **Run workflow**), where you can pick a Tailscale version and extra features.
+
+Each run produces:
+
+* the image on GitHub Container Registry: `ghcr.io/<owner>/<repo>:latest` and `:<tailscale version>` (manual runs with extra features get a tag like `:1.104.2-ssh-useexitnode` instead and don't move `latest`). For a router to pull it without credentials, set the package visibility to **Public** under the package's settings on GitHub.
+* `tailscale-arm64.tar`, `tailscale-armv7.tar` and `tailscale-amd64.tar` as downloadable files on the workflow run's page, for Step 6b/6c.
 
 ### Configure the Router
 
@@ -142,6 +155,15 @@ Configure the registry URL and add the container.
 set registry-url=https://ghcr.io tmpdir=disk1/pull
 
 /container add remote-image=fluent-networks/tailscale-mikrotik:latest interface=veth1 envlist=tailscale cmd=/usr/local/bin/tailscale.sh root-dir=disk1/containers/tailscale mounts=tailscale start-on-boot=yes hostname=mikrotik dns=8.8.4.4,8.8.8.8
+```
+
+On routers without external storage (e.g. hAP ax2), download into a RAM disk and extract to internal storage. Replace `<owner>/<repo>` with the image built by your GitHub Actions workflow:
+
+```
+/disk add type=tmpfs tmpfs-max-size=10M
+/container/config set registry-url=https://ghcr.io tmpdir=tmp1/pull
+
+/container add remote-image=<owner>/<repo>:latest interface=veth1 envlist=tailscale cmd=/usr/local/bin/tailscale.sh root-dir=containers/tailscale mounts=tailscale start-on-boot=yes hostname=mikrotik dns=8.8.4.4,8.8.8.8
 ```
 
 6b. Tar archive file
