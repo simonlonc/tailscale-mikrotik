@@ -29,6 +29,8 @@ MIPS routers can't run containers.
 
 Kept features: subnet routes (`--advertise-routes`), exit node (`--advertise-exit-node`), `--accept-routes`, MagicDNS, direct (NAT traversal) connections, OAuth client secrets as `AUTH_KEY`, iptables firewall/SNAT. Compiled out include Tailscale SSH, Taildrop, Serve/Funnel, using an exit node (`--exit-node`), UPnP/NAT-PMP port mapping, Tailnet Lock and `tailscale update`. To add any of them back, append its name to `TS_FEATURES` in the [Dockerfile](Dockerfile) (`go run ./cmd/featuretags --list` in the tailscale source lists them all); each adds some size.
 
+There is also a **full** image with every Tailscale feature (about 9–12 MB instead of 4–5 MB, and more RAM). Locally: `TS_ALL_FEATURES=true ./build.sh`.
+
 ## Requirements
 
 The Mikrotik Container package is compatible with ARM, ARM64 and x86 architectures and the router must be be running RouterOS v7.6 or later. Refer to the [Mikrotik Container documentation](https://help.mikrotik.com/docs/display/ROS/Container) for recommendations, disclaimer and security risks. 
@@ -64,10 +66,16 @@ The workflow in [.github/workflows/build.yml](.github/workflows/build.yml) build
 * on every push to `main` (rebuilds the current Tailscale version and refreshes that release's files),
 * manually from the **Actions** tab (**Build image** → **Run workflow**), where you can pick a Tailscale version and extra features.
 
-Each build produces:
+Each build produces two variants of the image, **default** (the small one described above) and **full** (every Tailscale feature):
 
-* the image on GitHub Container Registry: `ghcr.io/<owner>/<repo>:latest` and `:<tailscale version>`. Both are multi-architecture images, so a router pulling them gets the arm64, arm (ARMv7) or amd64 variant that matches its CPU automatically. ARMv5 routers use the `:latest-armv5` / `:<tailscale version>-armv5` tags instead. Manual runs with extra features get a tag like `:1.104.2-ssh-useexitnode` instead, don't move `latest` and don't make a release. For a router to pull the image without credentials, set the package visibility to **Public** under the package's settings on GitHub.
-* `tailscale-arm64.tar`, `tailscale-armv7.tar`, `tailscale-armv5.tar` and `tailscale-amd64.tar`, attached to the GitHub release (and to the workflow run), for Step 6b/6c.
+| Router CPU | Default | Full |
+| --- | --- | --- |
+| arm64, 32-bit ARM (ARMv7), x86 | `:latest`, `:<version>` | `:latest-full`, `:<version>-full` |
+| ARMv5 (EN7562 CPU, e.g. hEX refresh) | `:latest-armv5`, `:<version>-armv5` | `:latest-full-armv5`, `:<version>-full-armv5` |
+
+* The images are on GitHub Container Registry as `ghcr.io/<owner>/<repo>:<tag>`. The tags in the first row are multi-architecture images, so a router pulling them gets the arm64, arm (ARMv7) or amd64 variant that matches its CPU automatically. For a router to pull without credentials, set the package visibility to **Public** under the package's settings on GitHub.
+* `tailscale-arm64.tar`, `tailscale-armv7.tar`, `tailscale-armv5.tar`, `tailscale-amd64.tar` and the same four with `-full` (e.g. `tailscale-arm64-full.tar`) are attached to the GitHub release (and to the workflow run), for Step 6b/6c.
+* Manual runs with extra features build only one custom image with a tag like `:1.104.2-ssh-useexitnode`, don't move `latest` and don't make a release.
 
 To get an email when a new release appears, use **Watch → Custom → Releases** on the repository. GitHub turns off scheduled workflows in public repositories after 60 days without activity; if that happens, re-enable the workflow in the **Actions** tab.
 

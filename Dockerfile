@@ -57,6 +57,8 @@ WORKDIR /src
 ARG TS_FEATURES=cli,osrouter,iptables,nattraversal,advertiseroutes,advertiseexitnode,useroutes,ipnbus,oauthkey,dns,bakedroots
 # Extra features on top of the list above, e.g. "ssh,useexitnode,portmapper".
 ARG TS_EXTRA_FEATURES=
+# "true" builds with every Tailscale feature instead (the "full" image).
+ARG TS_ALL_FEATURES=false
 
 # Embed Mozilla CA roots, used only when the image has no CA bundle (it has none).
 RUN printf 'package main\n\nimport _ "golang.org/x/crypto/x509roots/fallback"\n' \
@@ -68,8 +70,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     set -e; \
     eval "$(go run ./cmd/mkversion)"; \
-    FEATURES="${TS_FEATURES}${TS_EXTRA_FEATURES:+,$TS_EXTRA_FEATURES}"; \
     KNOWN="$(go run ./cmd/featuretags --list)"; \
+    if [ "$TS_ALL_FEATURES" = true ]; then \
+      FEATURES="$(echo "$KNOWN" | sed -n 's/^ *\([a-z0-9_]*\): .*/\1/p' | tr '\n' ',' | sed 's/,$//')"; \
+    else \
+      FEATURES="${TS_FEATURES}${TS_EXTRA_FEATURES:+,$TS_EXTRA_FEATURES}"; \
+    fi; \
+    echo "Tailscale features: $FEATURES"; \
     for f in $(echo "$FEATURES" | tr , ' '); do \
       echo "$KNOWN" | grep -q "^ *$f: " || { echo "Unknown Tailscale feature: $f" >&2; exit 1; }; \
     done; \

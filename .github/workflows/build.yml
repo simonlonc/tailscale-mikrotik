@@ -14,7 +14,7 @@ on:
         default: latest
         required: true
       extra_features:
-        description: "Extra Tailscale features, comma-separated (e.g. ssh,useexitnode)"
+        description: "Custom build only: extra Tailscale features, comma-separated (e.g. ssh,useexitnode). Leave empty for the normal default + full builds."
         default: ""
         required: false
 
@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Multi-arch image (:latest, :<version>), RouterOS pulls the matching one:
+  # Multi-arch image, RouterOS pulls the matching one:
   # arm64 (hAP ax2/ax3, RB5009...), arm/v7 (hAP ac2/ac3, RB4011...), amd64 (CHR, x86)
   PLATFORMS: linux/arm64,linux/arm/v7,linux/amd64
   # ARMv5 routers (EN7562 CPU, e.g. hEX refresh) get separate "-armv5" tags,
@@ -35,12 +35,19 @@ env:
   PLATFORM_ARMV5: linux/arm/v5
 
 jobs:
-  build:
+  # Which Tailscale version, which image variants, and whether there is anything to do
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      newest: ${{ steps.meta.outputs.newest }}
+      add_latest: ${{ steps.meta.outputs.add_latest }}
+      release: ${{ steps.meta.outputs.release }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      matrix: ${{ steps.meta.outputs.matrix }}
+      skip: ${{ steps.check.outputs.skip }}
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Resolve Tailscale version and image tags
+      - name: Resolve Tailscale version and image variants
         id: meta
         env:
           REQUESTED_VERSION: ${{ inputs.tailscale_version || 'latest' }}
@@ -56,42 +63,44 @@ jobs:
               | sed -n 's#.*refs/tags/v\(1\.[0-9]*[02468]\.[0-9]*\)$#\1#p' \
               | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
           fi
-          if [ -z "$version" ]; then
-            echo "::error::Could not determine the Tailscale version"
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid or unknown Tailscale version: '$version'"
             exit 1
           fi
 
           extra=$(echo "$EXTRA_FEATURES" | tr -d ' ')
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if ! echo "$extra" | grep -Eq '^[a-z0-9_,]*$'; then
+            echo "::error::Invalid extra_features: '$extra'"
+            exit 1
+          fi
+
           newest=false
           [ "$REQUESTED_VERSION" = latest ] && newest=true
+
           if [ -n "$extra" ]; then
-            tags="$image:$version-$(echo "$extra" | tr ',' '-')"
+            # Custom build: one image with the extra features, no release, no "latest"
+            suffix="-$(echo "$extra" | tr ',' '-')"
+            matrix="{\"include\":[{\"variant\":\"custom\",\"all\":\"false\",\"extra\":\"$extra\",\"suffix\":\"$suffix\"}]}"
+            add_latest=false
+            release=false
           else
-            tags="$image:$version"
-            if [ "$newest" = true ] && [ "$IS_DEFAULT_BRANCH" = true ]; then
-              tags="$tags,$image:latest"
-            fi
+            # Normal build: "default" (minimal) and "full" (every Tailscale feature)
+            matrix='{"include":[{"variant":"default","all":"false","extra":"","suffix":""},{"variant":"full","all":"true","extra":"","suffix":"-full"}]}'
+            add_latest=false
+            [ "$newest" = true ] && [ "$IS_DEFAULT_BRANCH" = true ] && add_latest=true
+            release=false
+            [ "$EVENT" != pull_request ] && [ "$IS_DEFAULT_BRANCH" = true ] && release=true
           fi
-
-          # A GitHub release is made for standard builds from the default branch
-          release=false
-          if [ "$EVENT" != pull_request ] && [ "$IS_DEFAULT_BRANCH" = true ] && [ -z "$extra" ]; then
-            release=true
-          fi
-
-          tags_armv5=$(echo "$tags" | sed 's/,/-armv5,/g; s/$/-armv5/')
 
           {
             echo "version=$version"
-            echo "extra=$extra"
-            echo "tags=$tags"
-            echo "tags_armv5=$tags_armv5"
             echo "newest=$newest"
+            echo "add_latest=$add_latest"
             echo "release=$release"
             echo "release_tag=v$version"
+            echo "matrix=$matrix"
           } >> "$GITHUB_OUTPUT"
-          echo "Tailscale $version${extra:+ with extra features $extra} -> $tags (release: $release)"
+          echo "Tailscale $version, variants: $matrix, release: $release"
 
       - name: Skip if this version is already released
         id: check
@@ -105,8 +114,41 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
+  build:
+    name: Build ${{ matrix.variant }}
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SUFFIX: ${{ matrix.suffix }}
+      TS_ALL_FEATURES: ${{ matrix.all }}
+      TS_EXTRA_FEATURES: ${{ matrix.extra }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Image tags
+        id: tags
+        env:
+          ADD_LATEST: ${{ needs.prepare.outputs.add_latest }}
+        run: |
+          set -eu
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags="$image:$VERSION$SUFFIX"
+          [ "$ADD_LATEST" = true ] && tags="$tags,$image:latest$SUFFIX"
+          tags_armv5=$(echo "$tags" | sed 's/,/-armv5,/g; s/$/-armv5/')
+          {
+            echo "tags=$tags"
+            echo "tags_armv5=$tags_armv5"
+          } >> "$GITHUB_OUTPUT"
+          echo "Tags: $tags"
+          echo "ARMv5 tags: $tags_armv5"
+
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request' && steps.check.outputs.skip != 'true'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -114,124 +156,147 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v4
-        if: steps.check.outputs.skip != 'true'
 
       # Multi-arch image on ghcr.io, which RouterOS can pull directly
       - name: Build (and push) the image
-        if: steps.check.outputs.skip != 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.version=${{ env.VERSION }}
           build-args: |
-            TAILSCALE_VERSION=${{ steps.meta.outputs.version }}
-            TS_EXTRA_FEATURES=${{ steps.meta.outputs.extra }}
+            TAILSCALE_VERSION=${{ env.VERSION }}
+            TS_ALL_FEATURES=${{ env.TS_ALL_FEATURES }}
+            TS_EXTRA_FEATURES=${{ env.TS_EXTRA_FEATURES }}
           # plain Docker manifests; RouterOS doesn't need attestations
           provenance: false
           sbom: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
       - name: Build (and push) the ARMv5 image
-        if: steps.check.outputs.skip != 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ env.PLATFORM_ARMV5 }}
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags_armv5 }}
+          tags: ${{ steps.tags.outputs.tags_armv5 }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.version=${{ env.VERSION }}
           build-args: |
-            TAILSCALE_VERSION=${{ steps.meta.outputs.version }}
-            TS_EXTRA_FEATURES=${{ steps.meta.outputs.extra }}
+            TAILSCALE_VERSION=${{ env.VERSION }}
+            TS_ALL_FEATURES=${{ env.TS_ALL_FEATURES }}
+            TS_EXTRA_FEATURES=${{ env.TS_EXTRA_FEATURES }}
           provenance: false
           sbom: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.variant }}-armv5
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-armv5
 
-      # tailscale-<arch>.tar files for /container/add file=... (reuses the build cache)
+      # tailscale-<arch><suffix>.tar files for /container/add file=... (reuses the build cache)
       - name: Export image archives for RouterOS
-        if: steps.check.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-          EXTRA: ${{ steps.meta.outputs.extra }}
         run: |
           set -eu
           command -v skopeo > /dev/null || { sudo apt-get update -q && sudo apt-get install -y -q skopeo; }
           for platform in $(echo "$PLATFORMS,$PLATFORM_ARMV5" | tr ',' ' '); do
             arch=$(echo "${platform#linux/}" | tr -d '/')
             docker buildx build --platform "$platform" --load -t "tailscale-mikrotik:$arch" \
-              --build-arg TAILSCALE_VERSION="$VERSION" --build-arg TS_EXTRA_FEATURES="$EXTRA" .
-            skopeo copy "docker-daemon:tailscale-mikrotik:$arch" "docker-archive:tailscale-$arch.tar"
+              --build-arg TAILSCALE_VERSION="$VERSION" \
+              --build-arg TS_ALL_FEATURES="$TS_ALL_FEATURES" \
+              --build-arg TS_EXTRA_FEATURES="$TS_EXTRA_FEATURES" .
+            skopeo copy "docker-daemon:tailscale-mikrotik:$arch" "docker-archive:tailscale-$arch$SUFFIX.tar"
           done
           ls -l tailscale-*.tar
 
       - uses: actions/upload-artifact@v7
-        if: steps.check.outputs.skip != 'true'
         with:
-          path: tailscale-arm64.tar
+          path: tailscale-arm64${{ matrix.suffix }}.tar
           archive: false
 
       - uses: actions/upload-artifact@v7
-        if: steps.check.outputs.skip != 'true'
         with:
-          path: tailscale-armv7.tar
+          path: tailscale-armv7${{ matrix.suffix }}.tar
           archive: false
 
       - uses: actions/upload-artifact@v7
-        if: steps.check.outputs.skip != 'true'
         with:
-          path: tailscale-armv5.tar
+          path: tailscale-armv5${{ matrix.suffix }}.tar
           archive: false
 
       - uses: actions/upload-artifact@v7
-        if: steps.check.outputs.skip != 'true'
         with:
-          path: tailscale-amd64.tar
+          path: tailscale-amd64${{ matrix.suffix }}.tar
           archive: false
+
+  # One release per Tailscale version, with the files of both variants
+  release:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: tailscale-*.tar
+          merge-multiple: true
+          path: dist
 
       # New Tailscale version -> new release; same version rebuilt -> files replaced
       - name: Publish GitHub release
-        if: steps.check.outputs.skip != 'true' && steps.meta.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
-          NEWEST: ${{ steps.meta.outputs.newest }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          NEWEST: ${{ needs.prepare.outputs.newest }}
         run: |
           set -eu
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          files=$(find dist -type f -name 'tailscale-*.tar' | sort)
+          count=$(echo "$files" | grep -c . || true)
+          if [ "$count" -ne 8 ]; then
+            echo "::error::Expected 8 image files, found $count:"
+            echo "$files"
+            exit 1
+          fi
+
+          # shellcheck disable=SC2086 # file names contain no spaces
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" tailscale-*.tar --clobber
+            gh release upload "$RELEASE_TAG" $files --clobber
             echo "Updated the files of release $RELEASE_TAG"
             exit 0
           fi
 
-          also_latest=""
-          [ "$NEWEST" = true ] && also_latest=" (also \`:latest\`)"
-          sizes=$(for f in tailscale-*.tar; do
-            printf -- "- \`%s\` (%s MB)\n" "$f" "$(awk -v b="$(stat -c %s "$f")" 'BEGIN{printf "%.1f", b/1048576}')"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          latest_note=""
+          if [ "$NEWEST" = true ]; then
+            latest_note="The same images are also tagged \`latest\`, \`latest-full\`, \`latest-armv5\` and \`latest-full-armv5\`."
+          fi
+          sizes=$(for f in $files; do
+            printf -- "- \`%s\` (%s MB)\n" "$(basename "$f")" "$(awk -v b="$(stat -c %s "$f")" 'BEGIN{printf "%.1f", b/1048576}')"
           done)
           cat > notes.md <<EOF
           Tailscale **$VERSION** for MikroTik RouterOS containers. Tailscale changes: https://tailscale.com/changelog
 
-          **Image:** \`$image:$VERSION\`$also_latest, the right one for arm64, 32-bit ARM (ARMv7) and x86 is picked automatically. ARMv5 routers (EN7562 CPU, e.g. hEX refresh): \`$image:$VERSION-armv5\`
+          Two variants: **default** (small, only what a subnet router / exit node needs) and **full** (every Tailscale feature, e.g. Tailscale SSH, Taildrop, Serve).
 
-          **Files** for \`/container/add file=...\`:
+          | Router CPU | Default | Full |
+          | --- | --- | --- |
+          | arm64, 32-bit ARM (ARMv7), x86: picked automatically | \`$image:$VERSION\` | \`$image:$VERSION-full\` |
+          | ARMv5 (EN7562 CPU, e.g. hEX refresh) | \`$image:$VERSION-armv5\` | \`$image:$VERSION-full-armv5\` |
+
+          $latest_note
+
+          **Files** for \`/container/add file=...\` (\`-full\` = all features):
           $sizes
 
           On the router, either pull the new image (\`/container/stop 0\`, then \`/container/update 0\`), or upload the \`.tar\` for your CPU and recreate the container.
           EOF
 
-          gh release create "$RELEASE_TAG" tailscale-*.tar \
+          # shellcheck disable=SC2086
+          gh release create "$RELEASE_TAG" $files \
             --title "Tailscale $VERSION" \
             --notes-file notes.md \
             --target "$GITHUB_SHA" \

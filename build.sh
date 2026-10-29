@@ -42,6 +42,9 @@ TAILSCALE_VERSION=${TAILSCALE_VERSION:-latest}
 # Optional extra Tailscale features, e.g.: TS_EXTRA_FEATURES=ssh,useexitnode ./build.sh
 TS_EXTRA_FEATURES=${TS_EXTRA_FEATURES:-}
 
+# Build with every Tailscale feature (the "full" image): TS_ALL_FEATURES=true ./build.sh
+TS_ALL_FEATURES=${TS_ALL_FEATURES:-false}
+
 set -eu
 
 if [ "$TAILSCALE_VERSION" = "latest" ]; then
@@ -53,7 +56,7 @@ if [ "$TAILSCALE_VERSION" = "latest" ]; then
     exit 1
   fi
 fi
-echo "Building Tailscale $TAILSCALE_VERSION${TS_EXTRA_FEATURES:+ with extra features: $TS_EXTRA_FEATURES}"
+echo "Building Tailscale $TAILSCALE_VERSION${TS_EXTRA_FEATURES:+ with extra features: $TS_EXTRA_FEATURES}$( [ "$TS_ALL_FEATURES" = true ] && echo ' with all features')"
 
 rm -f tailscale.tar
 
@@ -61,6 +64,7 @@ docker buildx build \
   --no-cache \
   --build-arg TAILSCALE_VERSION=$TAILSCALE_VERSION \
   --build-arg TS_EXTRA_FEATURES=$TS_EXTRA_FEATURES \
+  --build-arg TS_ALL_FEATURES=$TS_ALL_FEATURES \
   --platform $PLATFORM \
   --load -t ghcr.io/fluent-networks/tailscale-mikrotik:$VERSION .
 
