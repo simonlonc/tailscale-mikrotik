@@ -123,8 +123,9 @@ WORKDIR /src
 RUN set -e; . /target.env; \
     tar xzf musl-1.2.5.tar.gz; cd musl-1.2.5; \
     ./configure --target="$T" CROSS_COMPILE="$T-" CFLAGS="-Os $F" \
-      --prefix=/opt/musl --disable-shared >/dev/null; \
+      --prefix=/opt/musl --disable-shared --enable-wrapper=gcc >/dev/null; \
     make -j"$(nproc)" >/dev/null; make install >/dev/null; \
+    test -x /opt/musl/bin/musl-gcc || { echo "musl-gcc wrapper was not built" >&2; exit 1; }; \
     cp -r "/usr/$T/include/linux" "/usr/$T/include/asm" "/usr/$T/include/asm-generic" \
       /opt/musl/include/; \
     printf '#!/bin/sh\nexec /opt/musl/bin/musl-gcc %s "$@"\n' "$F" > /usr/local/bin/target-cc; \
