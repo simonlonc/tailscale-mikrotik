@@ -89,6 +89,43 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -o /out/tailscaled ./cmd/tailscaled; \
     upx --lzma --best /out/tailscaled
 
+# --- 2a. source code for musl, busybox and iptables -----------------------
+# Downloaded once per build. Each file is tried from its own website first,
+# then from Ubuntu's and Debian's archives (identical files), and is always
+# checked against its SHA-256, so one slow server can't fail the build.
+FROM --platform=$BUILDPLATFORM ubuntu:${UBUNTU_VERSION} AS sources
+RUN set -e; \
+    apt-get update -q; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+      curl ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
+RUN set -e; mkdir -p /src; cd /src; \
+    fetch() { \
+      file=$1; sum=$2; shift 2; \
+      for url in "$@"; do \
+        if curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 \
+             --speed-limit 1024 --speed-time 60 -o "$file" "$url" \
+           && echo "$sum  $file" | sha256sum -c - >/dev/null 2>&1; then \
+          echo "$file: OK from $url"; return 0; \
+        fi; \
+        echo "$file: $url failed or had a wrong checksum, trying the next source" >&2; \
+        rm -f "$file"; \
+      done; \
+      echo "$file: could not be downloaded from any source" >&2; return 1; \
+    }; \
+    fetch musl-1.2.5.tar.gz a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 \
+      https://musl.libc.org/releases/musl-1.2.5.tar.gz \
+      http://archive.ubuntu.com/ubuntu/pool/universe/m/musl/musl_1.2.5.orig.tar.gz \
+      http://deb.debian.org/debian/pool/main/m/musl/musl_1.2.5.orig.tar.gz; \
+    fetch busybox-1.37.0.tar.bz2 3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 \
+      https://busybox.net/downloads/busybox-1.37.0.tar.bz2 \
+      http://archive.ubuntu.com/ubuntu/pool/main/b/busybox/busybox_1.37.0.orig.tar.bz2 \
+      http://deb.debian.org/debian/pool/main/b/busybox/busybox_1.37.0.orig.tar.bz2; \
+    fetch iptables-1.8.11.tar.xz d87303d55ef8c92bcad4dd3f978b26d272013642b029425775f5bad1009fe7b2 \
+      https://www.netfilter.org/pub/iptables/iptables-1.8.11.tar.xz \
+      http://archive.ubuntu.com/ubuntu/pool/main/i/iptables/iptables_1.8.11.orig.tar.xz \
+      http://deb.debian.org/debian/pool/main/i/iptables/iptables_1.8.11.orig.tar.xz
+
 # --- 2. static busybox + iptables-legacy, cross-compiled with musl ---------
 # Cross-compiling (instead of building on an emulated target) is faster and
 # also covers ARMv5, for which there is no Alpine image.
@@ -110,12 +147,7 @@ RUN set -e; \
       "gcc-$(echo "$T" | tr _ -)" "linux-libc-dev-$D-cross"; \
     rm -rf /var/lib/apt/lists/*
 
-ADD --checksum=sha256:a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 \
-    https://musl.libc.org/releases/musl-1.2.5.tar.gz /src/
-ADD --checksum=sha256:3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 \
-    https://busybox.net/downloads/busybox-1.37.0.tar.bz2 /src/
-ADD --checksum=sha256:d87303d55ef8c92bcad4dd3f978b26d272013642b029425775f5bad1009fe7b2 \
-    https://www.netfilter.org/pub/iptables/iptables-1.8.11.tar.xz /src/
+COPY --from=sources /src/ /src/
 COPY busybox.fragment /src/
 WORKDIR /src
 
