@@ -1,3 +1,7 @@
 *
 !busybox.fragment
 !tailscale.sh
+!LICENSE
+!NOTICE
+!scripts/fetch-sources.sh
+!scripts/collect-go-licenses.sh

@@ -28,6 +28,7 @@
 #  - no Alpine, bash, openssh, curl, jq or iproute2: FROM scratch with a small
 #    static busybox (sh, ip, sysctl, vi, ping, ...) and a static iptables-legacy
 #  - CA roots are embedded in the binary instead of shipping /etc/ssl
+#  - license texts of everything inside are in /usr/share/licenses (see NOTICE)
 #
 ############################################################################
 
@@ -64,6 +65,7 @@ ARG TS_ALL_FEATURES=false
 RUN printf 'package main\n\nimport _ "golang.org/x/crypto/x509roots/fallback"\n' \
       > cmd/tailscaled/fallbackroots.go
 
+COPY scripts/collect-go-licenses.sh /usr/local/bin/
 ARG TARGETARCH
 ARG TARGETVARIANT
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -87,44 +89,20 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         -X tailscale.com/version.longStamp=$VERSION_LONG \
         -X tailscale.com/version.shortStamp=$VERSION_SHORT" \
       -o /out/tailscaled ./cmd/tailscaled; \
+    sh /usr/local/bin/collect-go-licenses.sh /out/tailscaled /out/licenses/go-modules; \
     upx --lzma --best /out/tailscaled
 
 # --- 2a. source code for musl, busybox and iptables -----------------------
-# Downloaded once per build. Each file is tried from its own website first,
-# then from Ubuntu's and Debian's archives (identical files), and is always
-# checked against its SHA-256, so one slow server can't fail the build.
+# Downloaded once per build, with retries, fallback mirrors and SHA-256
+# checks (see scripts/fetch-sources.sh).
 FROM --platform=$BUILDPLATFORM ubuntu:${UBUNTU_VERSION} AS sources
 RUN set -e; \
     apt-get update -q; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
       curl ca-certificates; \
     rm -rf /var/lib/apt/lists/*
-RUN set -e; mkdir -p /src; cd /src; \
-    fetch() { \
-      file=$1; sum=$2; shift 2; \
-      for url in "$@"; do \
-        if curl -fsSL --retry 3 --retry-all-errors --connect-timeout 20 \
-             --speed-limit 1024 --speed-time 60 -o "$file" "$url" \
-           && echo "$sum  $file" | sha256sum -c - >/dev/null 2>&1; then \
-          echo "$file: OK from $url"; return 0; \
-        fi; \
-        echo "$file: $url failed or had a wrong checksum, trying the next source" >&2; \
-        rm -f "$file"; \
-      done; \
-      echo "$file: could not be downloaded from any source" >&2; return 1; \
-    }; \
-    fetch musl-1.2.5.tar.gz a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4 \
-      https://musl.libc.org/releases/musl-1.2.5.tar.gz \
-      http://archive.ubuntu.com/ubuntu/pool/universe/m/musl/musl_1.2.5.orig.tar.gz \
-      http://deb.debian.org/debian/pool/main/m/musl/musl_1.2.5.orig.tar.gz; \
-    fetch busybox-1.37.0.tar.bz2 3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4 \
-      https://busybox.net/downloads/busybox-1.37.0.tar.bz2 \
-      http://archive.ubuntu.com/ubuntu/pool/main/b/busybox/busybox_1.37.0.orig.tar.bz2 \
-      http://deb.debian.org/debian/pool/main/b/busybox/busybox_1.37.0.orig.tar.bz2; \
-    fetch iptables-1.8.11.tar.xz d87303d55ef8c92bcad4dd3f978b26d272013642b029425775f5bad1009fe7b2 \
-      https://www.netfilter.org/pub/iptables/iptables-1.8.11.tar.xz \
-      http://archive.ubuntu.com/ubuntu/pool/main/i/iptables/iptables_1.8.11.orig.tar.xz \
-      http://deb.debian.org/debian/pool/main/i/iptables/iptables_1.8.11.orig.tar.xz
+COPY scripts/fetch-sources.sh /usr/local/bin/
+RUN sh /usr/local/bin/fetch-sources.sh /src
 
 # --- 2. static busybox + iptables-legacy, cross-compiled with musl ---------
 # Cross-compiling (instead of building on an emulated target) is faster and
@@ -158,6 +136,7 @@ RUN set -e; . /target.env; \
       --prefix=/opt/musl --disable-shared --enable-wrapper=gcc >/dev/null; \
     make -j"$(nproc)" >/dev/null; make install >/dev/null; \
     test -x /opt/musl/bin/musl-gcc || { echo "musl-gcc wrapper was not built" >&2; exit 1; }; \
+    install -D -m 644 COPYRIGHT /out/usr/share/licenses/musl/COPYRIGHT; \
     cp -r "/usr/$T/include/linux" "/usr/$T/include/asm" "/usr/$T/include/asm-generic" \
       /opt/musl/include/; \
     printf '#!/bin/sh\nexec /opt/musl/bin/musl-gcc %s "$@"\n' "$F" > /usr/local/bin/target-cc; \
@@ -174,6 +153,7 @@ RUN set -e; . /target.env; \
     yes '' | make oldconfig >/dev/null; \
     make -j"$(nproc)" CROSS_COMPILE="$T-" CC=target-cc busybox busybox.links; \
     install -D -m 755 busybox /out/bin/busybox; \
+    install -D -m 644 LICENSE /out/usr/share/licenses/busybox/LICENSE; \
     cp busybox.links /out/busybox.links
 
 RUN set -e; . /target.env; \
@@ -185,6 +165,7 @@ RUN set -e; . /target.env; \
       --disable-devel --disable-largefile; \
     make -j"$(nproc)" LDFLAGS="-all-static -Wl,--gc-sections"; \
     mkdir -p /out/usr/sbin; \
+    install -D -m 644 COPYING /out/usr/share/licenses/iptables/COPYING; \
     "$T-strip" -o /out/usr/sbin/xtables-legacy-multi iptables/xtables-legacy-multi
 
 # --- 3. assemble the root filesystem ----------------------------------------
@@ -192,6 +173,9 @@ FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS assemble
 RUN apk add --no-cache upx
 COPY --from=tools /out/ /rootfs/
 COPY --from=tailscale /out/tailscaled /rootfs/usr/local/bin/tailscaled
+COPY --from=tailscale /out/licenses/ /rootfs/usr/share/licenses/
+COPY LICENSE /rootfs/usr/share/licenses/tailscale-mikrotik/LICENSE
+COPY NOTICE /rootfs/usr/share/licenses/NOTICE
 COPY tailscale.sh /rootfs/usr/local/bin/tailscale.sh
 WORKDIR /rootfs
 RUN set -e; \
@@ -213,7 +197,17 @@ RUN set -e; \
     printf 'root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/false\n' > etc/passwd; \
     printf 'root:x:0:root\nnobody:x:65534:\n' > etc/group; \
     printf 'hosts: files dns\n' > etc/nsswitch.conf; \
-    printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > etc/hosts
+    printf '127.0.0.1\tlocalhost\n::1\tlocalhost\n' > etc/hosts; \
+    # identical license texts (e.g. one per golang.org/x module) become symlinks
+    mkdir /tmp/seen; cd usr/share/licenses; \
+    find . -type f | sort | while read -r f; do \
+      h=$(sha256sum "$f" | cut -d' ' -f1); \
+      if [ -e "/tmp/seen/$h" ]; then \
+        ln -sf "/usr/share/licenses/$(cat "/tmp/seen/$h")" "$f"; \
+      else \
+        echo "${f#./}" > "/tmp/seen/$h"; \
+      fi; \
+    done
 
 # --- 4. final image -----------------------------------------------------------
 FROM scratch

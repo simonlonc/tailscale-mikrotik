@@ -1,0 +1,47 @@
+tailscale-mikrotik
+==================
+
+This project is a fork of Fluent-networks/tailscale-mikrotik
+(https://github.com/Fluent-networks/tailscale-mikrotik), which is licensed
+under the BSD 3-Clause License, Copyright (c) 2024 Fluent Networks Pty Ltd &
+AUTHORS (see LICENSE). It is not affiliated with or endorsed by Fluent
+Networks, Tailscale Inc. or MikroTik. "Tailscale" and "MikroTik" are
+trademarks of their respective owners and are used here only to describe what
+the project works with.
+
+
+Third-party software in the container images
+--------------------------------------------
+
+The images built from this project contain the following software, each under
+its own license. The license texts are included in every image under
+/usr/share/licenses/.
+
+  Tailscale (tailscale, tailscaled)
+      BSD 3-Clause License, Copyright (c) 2020 Tailscale Inc & contributors.
+      Built with the Go standard library (BSD 3-Clause License, Copyright The
+      Go Authors) and the Go modules listed under
+      /usr/share/licenses/go-modules/, each under its own license (BSD, MIT,
+      Apache 2.0 and others).
+      Images with all Tailscale features ("full") also contain FreeType-Go,
+      used under the FreeType License: Portions of this software are
+      copyright (c) 2010 The FreeType Project (www.freetype.org).
+      All rights reserved.
+
+  BusyBox 1.37.0      GNU General Public License, version 2
+  iptables 1.8.11     GNU General Public License, version 2
+  musl 1.2.5          MIT License (statically linked into BusyBox and iptables)
+
+  The programs are compressed with UPX; the UPX decompression stub is used
+  under the special exception for compressed programs in the UPX license.
+
+
+Source code
+-----------
+
+The complete source code of BusyBox, iptables and musl used in the images is
+attached to every GitHub release of this project, next to the images. The
+release's "Source code" archive contains the build configuration used for
+them (Dockerfile, busybox.fragment, scripts/). The source code of Tailscale
+and of its Go modules is available from https://github.com/tailscale/tailscale
+and https://pkg.go.dev.

@@ -284,3 +284,10 @@ Note the script will continue to run if you are connecting over the tailnet. Whe
 ## Contributing
 
 We welcome suggestions and feedback from people interested in integrating Tailscale on the RouterOS platform. Please send a PR or create an issue if you're having any problems.
+
+## License
+
+This project is a fork of [Fluent-networks/tailscale-mikrotik](https://github.com/Fluent-networks/tailscale-mikrotik) and, like the original, is licensed under the BSD 3-Clause License (see [LICENSE](LICENSE)). It is not affiliated with or endorsed by Fluent Networks, Tailscale Inc. or MikroTik.
+
+The container images also contain third-party software under its own licenses: Tailscale and its Go modules (BSD-3-Clause, MIT, Apache-2.0 and others), BusyBox and iptables (GPL-2.0) and musl (MIT). [NOTICE](NOTICE) lists them. Every image includes the license texts in `/usr/share/licenses`, and every GitHub release has the source code of BusyBox, iptables and musl attached.
+

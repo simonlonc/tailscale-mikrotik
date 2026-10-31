@@ -238,11 +238,18 @@ jobs:
     if: needs.prepare.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           pattern: tailscale-*.tar
           merge-multiple: true
           path: dist
+
+      # The images contain BusyBox and iptables (GPL-2.0) and musl, so their
+      # exact source code is published next to the images (see NOTICE)
+      - name: Download the source code of BusyBox, iptables and musl
+        run: sh scripts/fetch-sources.sh dist/sources
 
       # New Tailscale version -> new release; same version rebuilt -> files replaced
       - name: Publish GitHub release
@@ -261,10 +268,15 @@ jobs:
             echo "$files"
             exit 1
           fi
+          sources=$(find dist/sources -type f | sort)
+          if [ "$(echo "$sources" | grep -c .)" -ne 3 ]; then
+            echo "::error::Expected 3 source archives, found: $sources"
+            exit 1
+          fi
 
           # shellcheck disable=SC2086 # file names contain no spaces
           if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" $files --clobber
+            gh release upload "$RELEASE_TAG" $files $sources --clobber
             echo "Updated the files of release $RELEASE_TAG"
             exit 0
           fi
@@ -293,10 +305,12 @@ jobs:
           $sizes
 
           On the router, either pull the new image (\`/container/stop 0\`, then \`/container/update 0\`), or upload the \`.tar\` for your CPU and recreate the container.
+
+          **Licenses:** the images contain Tailscale (BSD-3-Clause), BusyBox and iptables (GPL-2.0) and musl (MIT); see [NOTICE](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/NOTICE). The license texts are in \`/usr/share/licenses\` inside every image, and the source code of BusyBox, iptables and musl is attached below.
           EOF
 
           # shellcheck disable=SC2086
-          gh release create "$RELEASE_TAG" $files \
+          gh release create "$RELEASE_TAG" $files $sources \
             --title "Tailscale $VERSION" \
             --notes-file notes.md \
             --target "$GITHUB_SHA" \
